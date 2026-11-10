@@ -1,0 +1,101 @@
+# ===== 全局 =====
+random_seed: 42
+log_level: INFO
+
+# ===== 数据层 =====
+data:
+  symbols: []                      # 空则回退到 configs/symbols_hs300.yaml
+  start: "20180101"
+  end: "20241231"
+  source: akshare                  # akshare | tencent | eastmoney
+  cache_dir: data/raw
+  adjust: none                     # 不复权（qfq 前复权 | hfq 后复权 | none 不复权）
+  retry_times: 3
+  retry_backoff: 1.5
+  timeout: 15.0
+
+# ===== 样本层 =====
+sample:
+  window: 20
+  features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - ma5
+    - ma10
+    - ma20
+    - momentum
+    - volatility
+    - volume_ratio
+  train_start: "20180101"
+  train_end:   "20211231"
+  test_start:  "20220101"
+  test_end:    "20241231"
+  embargo_days: 5
+  normalize: true
+
+# ===== 环境层（A 股规则）=====
+env:
+  initial_cash: 1000000.0
+  commission_rate: 0.00025         # 佣金 0.025% 双边
+  stamp_tax_rate: 0.0005           # 印花税 0.05% 卖出
+  slippage_rate: 0.001             # 滑点 0.1%
+  min_commission: 5.0
+  reward_type: drawdown_penalty    # gross | drawdown_penalty | sharpe | excess（excess=相对买入持有基准的超额收益）
+  lambda_drawdown: 0.1
+  lambda_turnover: 0.001
+  # 注意：本环境 long-only 且买入即用尽现金（max_position=1.0），
+  # position_ratio∈[0,1]、持仓即≈1，无法表达超额杠杆。λ_leverage 又是**按步**
+  # 收取的（rewards.py 每步都算 λ·|pos|），于是这一项在满仓时的年成本
+  # ≈ 0.01×231 ≈ 2.28 奖励点，而年基准波幅仅约 0.41（5.6 倍）——退化成
+  # 「持仓时长税」，使「永不买入」成为全局最优。
+  # 训练请用 `--reward excess`：该预设会把 λ_leverage 置 0。
+  # 此处保留 0.01 是为了维持「缺省路径字节级不变」；仅 drawdown_penalty
+  # 等非 excess 类型仍会命中该问题，详见 outputs/reward_diagnosis_report.md。
+  lambda_leverage: 0.01
+  max_position: 1.0
+  lot_size: 100
+
+# ===== 训练层 =====
+train:
+  algo: ppo                        # ppo | sac | dqn
+  timesteps: 200000
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  ent_coef: 0.0
+  torch_threads: 1
+  backend: auto                    # auto | sb3 | numpy
+  out_dir: models
+
+# ===== 路径 =====
+paths:
+  root: .
+  raw: data/raw
+  samples: data/samples
+  models: models
+  logs: logs
+  reports: reports
+
+# ===== 大规模训练 / 检测编排（增量，scale 子命令）=====
+scale:
+  years: null                      # null = 动态取「最近 20 个完整自然年」(today.year-20, today.year-1)；或显式 [2006, 2025]
+  symbols_file: configs/symbols_hs300_full.yaml
+  split_ratio:
+    train: 0.8
+    detect: 0.2
+  workers: 1                       # 首版严格串行（Windows 稳定优先），P2 预留
+  poll_sec: 2                      # 控制/状态轮询间隔（秒）
+  train:
+    timesteps: 20000               # 单元级默认步数（Q4）
+    algo: ppo
+    backend: auto
+  detect:
+    model_policy: nearest_past     # nearest_past | nearest | max_year | none
+    mode: backtest                 # 首版仅 backtest（predict/both 预留，未实现时明确报「暂不支持」）

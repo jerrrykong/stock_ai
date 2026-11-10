@@ -1,0 +1,133 @@
+%% Program call flow — 6 independent CLI command chains
+%% All inter-command communication is via FILE CONTRACTS only.
+
+sequenceDiagram
+    autonumber
+    actor User
+    participant CLI as stock_ai.cli.main
+    participant Cfg as ConfigLoader
+    participant DL as StockDataLoader
+    participant DS as DataSource(akshare/tencent/em)
+    participant Cache as DataCache
+    participant SB as SampleBuilder
+    participant FE as FeatureEngineer
+    participant Env as TradingEnv
+    participant TF as TrainerFactory
+    participant TR as SB3Trainer/NumpyPPO
+    participant BT as Backtester
+    participant MC as MetricsCalculator
+    participant PR as Predictor
+
+    Note over User,PR: ============ CMD 1: data fetch ============
+    User->>CLI: python -m stock_ai data fetch --symbols ... --start --end
+    CLI->>Cfg: load(configs/default.yaml) + merge cli overrides
+    Cfg-->>CLI: AppConfig
+    CLI->>DL: fetch_all()
+    loop each symbol
+        DL->>Cache: exists(symbol)?
+        alt cache hit & range covered
+            Cache-->>DL: cached df
+        else miss / partial
+            DL->>DS: ak.finance fetch(symbol, start, end)
+            DS-->>DL: raw df  (on error -> retry w/ backoff -> next source)
+            DL->>Cache: write parquet + meta.json
+        end
+    end
+    DL-->>CLI: dict[symbol, df]
+    CLI-->>User: summary + data/meta.json
+
+    Note over User,PR: ============ CMD 2: data refresh ============
+    User->>CLI: python -m stock_ai data refresh --symbols
+    CLI->>Cfg: load + merge
+    CLI->>DL: refresh_symbol(symbol) for each
+    DL->>Cache: read(symbol)
+    Cache-->>DL: cached df (last_date)
+    DL->>DS: fetch(symbol, last_date+1, today)
+    DS-->>DL: new rows
+    DL->>DL: merge_incremental(old, new) -> dedupe, sort, gap check
+    DL->>Cache: write parquet + meta.json (updated)
+    DL-->>CLI: refreshed df
+    CLI-->>User: new rows count per symbol + gap warnings
+
+    Note over User,PR: ============ CMD 3: sample build ============
+    User->>CLI: python -m stock_ai sample build --train-start ... --test-end ... --features --window --seed
+    CLI->>Cfg: load + merge
+    CLI->>DL: load_cached(symbol) for each symbol
+    DL-->>SB: raw dfs
+    SB->>FE: build_indicators(df, features)
+    FE-->>SB: indicator df
+    SB->>FE: fit(train_window_only)   %% no leakage
+    FE-->>SB: NormalizerState(mean,std)
+    SB->>FE: transform(train/val/test)
+    FE-->>SB: normalized arrays
+    SB->>SB: make_obs_matrix(window) + embargo gap
+    SB->>SB: compute_data_hash(raw parquets)
+    SB-->>CLI: SampleBundle
+    CLI->>SB: save(bundle, data/samples/)
+    SB-->>User: train.npz/test.npz/meta.json (+data_hash)
+
+    Note over User,PR: ============ CMD 4: train ============
+    User->>CLI: python -m stock_ai train --algo ppo --samples --timesteps --seed
+    CLI->>Cfg: load + merge
+    CLI->>SB: load(train.npz, meta.json)   %% file contract
+    SB-->>Env: SampleSplit(train)
+    CLI->>Env: TradingEnv(sample_split, env_cfg, seed)
+    Env-->>CLI: env instance
+    CLI->>TL: check_env(env)  (gymnasium compliance gate)
+    CLI->>TF: create(train_cfg, env, preference=sb3)
+    TF->>TF: backend_available('stable_baselines3')?
+    alt SB3 importable
+        TF-->>TR: SB3Trainer(PPO)
+    else SB3 unavailable / version conflict
+        TF-->>TR: NumpyPPOTrainer (pure-numpy fallback)
+    end
+    CLI->>TR: build(timesteps).train()
+    TR->>Env: reset()/step() loop
+    Env-->>TR: obs, reward, terminated, truncated, info
+    TR-->>CLI: TrainResult(run_dir, model_path, curve)
+    CLI->>TR: save(models/<algo>_<ts>.zip)
+    TR-->>User: model .zip + logs/tensorboard + curve.png + sidecar json
+
+    Note over User,PR: ============ CMD 5: backtest ============
+    User->>CLI: python -m stock_ai backtest --model models/ppo_x.zip --samples test
+    CLI->>Cfg: load + merge
+    CLI->>SB: load(test.npz, meta.json)   %% file contract
+    CLI->>TR: load(zip_path, env)  (SB3.load / numpy.load)
+    TR-->>BT: Enrollment model
+    CLI->>Env: TradingEnv(test_split)
+    CLI->>BT: Backtester(model, env_cfg, samples)
+    BT->>Env: reset()
+    loop each test step
+        BT->>TR: predict(obs, deterministic=True)
+        TR-->>BT: action
+        BT->>Env: step(action)
+        Env-->>BT: obs, reward, done, info(portfolio_value, turnover)
+        BT->>BT: record equity, trade
+    end
+    BT->>MC: compute_all(equity, dates, trades)
+    MC-->>BT: metrics dict
+    BT->>BT: compare_with_baseline()  (buy&hold)
+    BT-->>CLI: BacktestResult
+    CLI->>BT: to_json(reports/backtest_<ts>.json)
+    CLI->>EP: plot(result, reports/equity_<ts>.png)
+    EP-->>User: metrics json + equity png
+
+    Note over User,PR: ============ CMD 6: predict ============
+    User->>CLI: python -m stock_ai predict --model models/ppo_x.zip --symbols --start --end
+    CLI->>Cfg: load + merge
+    CLI->>DL: fetch/load_cached(symbols, start, end)  (network or cache)
+    DL-->>PR: raw dfs
+    CLI->>SB: load meta.json -> NormalizerState (FROZEN)  %% use train stats, no refit
+    SB-->>PR: FrozenState
+    CLI->>TR: load(zip_path, env)
+    TR-->>PR: Enrollment model
+    PR->>FE: transform(symbol df, frozen state)
+    FE-->>PR: features
+    loop each trading day (stateful replay)
+        PR->>Env: reset() then step(policy action)
+        PR->>TR: predict(obs)
+        TR-->>PR: action (buy/sell/hold or target pos)
+        PR->>PR: record date, symbol, action, target_position, signal
+    end
+    PR->>PR: to_csv(reports/predict_<ts>.csv) + to_json(...)
+    PR-->>User: daily trading advice CSV/JSON

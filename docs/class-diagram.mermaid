@@ -1,0 +1,390 @@
+classDiagram
+    direction LR
+
+    class AppConfig {
+        +data: DataConfig
+        +sample: SampleConfig
+        +env: EnvConfig
+        +train: TrainConfig
+        +eval: EvalConfig
+        +paths: PathConfig
+        +random_seed: int
+        +from_yaml(path: Path) AppConfig
+        +from_dict(d: dict) AppConfig
+        +merge_cli_overrides(overrides: dict) AppConfig
+        +to_dict() dict
+        +ensure_dirs() None
+    }
+
+    class DataConfig {
+        +symbols: list[str]
+        +start: str
+        +end: str
+        +source: str
+        +cache_dir: Path
+        +adjust: str
+        +retry_times: int
+        +retry_backoff: float
+        +timeout: float
+    }
+
+    class SampleConfig {
+        +window: int
+        +features: list[str]
+        +train_start: str
+        +train_end: str
+        +test_start: str
+        +test_end: str
+        +embargo_days: int
+        +normalize: bool
+    }
+
+    class EnvConfig {
+        +initial_cash: float
+        +commission_rate: float
+        +stamp_tax_rate: float
+        +slippage_rate: float
+        +reward_type: str
+        +lambda_drawdown: float
+        +lambda_turnover: float
+        +lambda_leverage: float
+        +max_position: float
+    }
+
+    class TrainConfig {
+        +algo: str
+        +timesteps: int
+        +learning_rate: float
+        +gamma: float
+        +n_steps: int
+        +batch_size: int
+        +train_split: float
+        +val_split: float
+        +torch_threads: int
+        +out_dir: Path
+    }
+
+    class PathConfig {
+        +root: Path
+        +raw: Path
+        +samples: Path
+        +models: Path
+        +logs: Path
+        +reports: Path
+    }
+
+    class DataSource {
+        <<abstract>>
+        +name: str
+        +fetch(symbol: str, start: str, end: str) pd.DataFrame
+        +probe(symbol: str) bool
+    }
+
+    class AkShareSource {
+        +name: str
+        +fetch(symbol: str, start: str, end: str) pd.DataFrame
+    }
+
+    class TencentSource {
+        +name: str
+        +fetch(symbol: str, start: str, end: str) pd.DataFrame
+    }
+
+    class EastMoneySource {
+        +name: str
+        +fetch(symbol: str, start: str, end: str) pd.DataFrame
+    }
+
+    class StockDataLoader {
+        +config: DataConfig
+        +sources: list[DataSource]
+        +fetch_symbol(symbol: str, start: str, end: str) pd.DataFrame
+        +fetch_all() dict[str, pd.DataFrame]
+        +refresh_symbol(symbol: str) pd.DataFrame
+        +load_cached(symbol: str) pd.DataFrame
+        +save(symbol: str, df: pd.DataFrame) Path
+        +info() list[SymbolInfo]
+        +merge_incremental(old: pd.DataFrame, new: pd.DataFrame) pd.DataFrame
+    }
+
+    class DataCache {
+        +cache_dir: Path
+        +path_of(symbol: str) Path
+        +exists(symbol: str) bool
+        +read(symbol: str) pd.DataFrame
+        +write(symbol: str, df: pd.DataFrame) Path
+        +read_meta() dict
+        +write_meta(meta: dict) None
+    }
+
+    class FeatureEngineer {
+        +feature_names: list[str]
+        +fit(df: pd.DataFrame) NormalizerState
+        +transform(df: pd.DataFrame, state: NormalizerState) np.ndarray
+        +build_indicators(df: pd.DataFrame, names: list[str]) pd.DataFrame
+        +make_obs_matrix(feat: pd.DataFrame, state: NormalizerState, window: int) np.ndarray
+    }
+
+    class NormalizerState {
+        +mean: np.ndarray
+        +std: np.ndarray
+        +columns: list[str]
+        +data_hash: str
+        +to_dict() dict
+        +from_dict(d: dict) NormalizerState
+    }
+
+    class SampleBuilder {
+        +config: SampleConfig
+        +build_all(loader: StockDataLoader) SampleBundle
+        +build_split(dfs: dict, state: NormalizerState, start: str, end: str) SampleSplit
+        +compute_data_hash(paths: list[Path]) str
+        +save(bundle: SampleBundle, out_dir: Path) None
+    }
+
+    class SampleSplit {
+        +obs: np.ndarray
+        +dates: np.ndarray
+        +symbols: np.ndarray
+        +prices: np.ndarray
+        +requested_start: str
+        +requested_end: str
+        +n_steps: int
+        +n_features: int
+    }
+
+    class SampleBundle {
+        +train: SampleSplit
+        +val: SampleSplit
+        +test: SampleSplit
+        +normalizer: NormalizerState
+        +feature_names: list[str]
+        +window: int
+        +seed: int
+        +data_hash: str
+        +save_meta(path: Path) None
+    }
+
+    class TradingEnv {
+        +metadata: dict
+        +observation_space: gym.Space
+        +action_space: gym.Space
+        +reset(seed, options) tuple
+        +step(action) tuple
+        +render(mode: str) np.ndarray
+        +close() None
+        +_compute_reward(prev_value, value, turnover) float
+        +_exec_action(action) None
+        +_is_tradable(idx: int, direction: int) bool
+    }
+
+    class EnvState {
+        +cash: float
+        +shares: int
+        +cost_basis: float
+        +position_ratio: float
+        +cash_ratio: float
+        +unrealized_pnl: float
+        +portfolio_value: float
+        +blocked_by_t1: bool
+    }
+
+    class RewardCalculator {
+        +cfg: EnvConfig
+        +compute(prev_value: float, value: float, turnover: float, position_ratio: float) float
+    }
+
+    class Enrollment {
+        <<interface>>
+        +learn(total_timesteps: int) None
+        +predict(obs: np.ndarray, deterministic: bool) tuple
+        +save(path: Path) None
+        +load(path: Path) Enrollment
+    }
+
+    class SB3Trainer {
+        +algo_name: str
+        +env: TradingEnv
+        +model: object
+        +build(timesteps: int) SB3Trainer
+        +train() TrainResult
+        +save(path: Path) None
+        +load(zip_path: Path, env: TradingEnv) SB3Trainer
+        +predict(obs: np.ndarray, deterministic: bool) int
+    }
+
+    class NumpyPPOTrainer {
+        +algo_name: str
+        +policy: NumpyActorCritic
+        +env: TradingEnv
+        +build(timesteps: int) NumpyPPOTrainer
+        +train() TrainResult
+        +save(path: Path) None
+        +load(zip_path: Path, env: TradingEnv) NumpyPPOTrainer
+        +predict(obs: np.ndarray, deterministic: bool) int
+    }
+
+    class NumpyActorCritic {
+        +obs_dim: int
+        +n_actions: int
+        +hidden: int
+        +forward(obs: np.ndarray) tuple
+        +act(obs: np.ndarray, deterministic: bool) tuple
+        +save(path: Path) None
+    }
+
+    class TrainerFactory {
+        +create(cfg: TrainConfig, env: TradingEnv, preference: str) SB3Trainer_or_Numpy
+        +backend_available(name: str) bool
+    }
+
+    class TrainResult {
+        +run_dir: Path
+        +model_path: Path
+        +algo: str
+        +total_timesteps: int
+        +best_mean_reward: float
+        +elapsed_sec: float
+        +backend: str
+        +curve_path: Path
+    }
+
+    class PortfolioSimulator {
+        +env_cfg: EnvConfig
+        +run(actions: np.ndarray, prices: np.ndarray, dates: np.ndarray) BacktestResult
+        +apply_costs(notional: float, side: str) float
+        +mark_to_market() float
+    }
+
+    class MetricsCalculator {
+        +annual_return(equity: np.ndarray, dates: np.ndarray) float
+        +total_return(equity: np.ndarray) float
+        +max_drawdown(equity: np.ndarray) float
+        +sharpe(returns: np.ndarray, rf: float) float
+        +win_rate(trades: list) float
+        +turnover(trades: list, equity: np.ndarray) float
+        +compute_all(equity: np.ndarray, dates: np.ndarray, trades: list) dict
+    }
+
+    class Backtester {
+        +model: Enrollment
+        +env_cfg: EnvConfig
+        +samples: SampleSplit
+        +run() BacktestResult
+        +compare_with_baseline() dict
+    }
+
+    class BacktestResult {
+        +metrics: dict
+        +equity_curve: np.ndarray
+        +dates: np.ndarray
+        +trades: list
+        +baseline_equity: np.ndarray
+        +to_json(path: Path) None
+        +to_report_meta() dict
+    }
+
+    class EquityPlotter {
+        +plot(result: BacktestResult, out_path: Path, title: str) Path
+        +plot_training_curve(series: dict, out_path: Path) Path
+    }
+
+    class Predictor {
+        +model: Enrollment
+        +env_cfg: EnvConfig
+        +predict_range(symbols: list, start: str, end: str) list[dict]
+        +predict_from_frames(frames: dict, symbol: str) list[dict]
+        +_replay_state(history: list) tuple
+        +to_csv(rows: list, out: Path) Path
+        +to_json(rows: list, out: Path) Path
+    }
+
+    class ConfigLoader {
+        +load(path: Path) AppConfig
+        +resolve_paths(cfg: AppConfig, base: Path) AppConfig
+        +apply_env_overrides(cfg: AppConfig) AppConfig
+    }
+
+    class LoggerFactory {
+        +setup(name: str, log_dir: Path, level: str) Logger
+        +get(name: str) Logger
+    }
+
+    class StockAIError {
+        <<exception>>
+        +message: str
+    }
+
+    class DataSourceError {
+        <<exception>>
+    }
+
+    class NotTradableError {
+        <<exception>>
+    }
+
+    class ConfigError {
+        <<exception>>
+    }
+
+    class ArtifactError {
+        <<exception>>
+    }
+
+    %% ---------- Config composition ----------
+    AppConfig *-- DataConfig
+    AppConfig *-- SampleConfig
+    AppConfig *-- EnvConfig
+    AppConfig *-- TrainConfig
+    AppConfig *-- PathConfig
+
+    %% ---------- Data layer ----------
+    DataSource <|-- AkShareSource
+    DataSource <|-- TencentSource
+    DataSource <|-- EastMoneySource
+    StockDataLoader o-- DataSource : uses (fallback chain)
+    StockDataLoader o-- DataCache : persists via
+
+    %% ---------- Sample layer ----------
+    SampleBuilder --> StockDataLoader : reads raw
+    SampleBuilder o-- FeatureEngineer
+    FeatureEngineer --> NormalizerState : fitted on train only
+    SampleBuilder --> SampleBundle : produces
+    SampleBundle *-- SampleSplit : train
+    SampleBundle *-- SampleSplit : val
+    SampleBundle *-- SampleSplit : test
+
+    %% ---------- Env layer ----------
+    TradingEnv *-- EnvState
+    TradingEnv o-- RewardCalculator
+    TradingEnv ..> SampleSplit : obs feed
+
+    %% ---------- Train layer ----------
+    Enrollment <|.. SB3Trainer
+    Enrollment <|.. NumpyPPOTrainer
+    NumpyPPOTrainer o-- NumpyActorCritic
+    TrainerFactory --> Enrollment : returns
+    TrainerFactory ..> NumpyPPOTrainer : fallback
+    SB3Trainer --> TradingEnv
+    NumpyPPOTrainer --> TradingEnv
+    SB3Trainer ..> TrainResult
+    NumpyPPOTrainer ..> TrainResult
+
+    %% ---------- Eval layer ----------
+    Backtester --> Enrollment
+    Backtester o-- PortfolioSimulator
+    Backtester --> MetricsCalculator
+    Backtester ..> BacktestResult
+    BacktestResult o-- MetricsCalculator
+    EquityPlotter ..> BacktestResult
+
+    %% ---------- Inference layer ----------
+    Predictor --> Enrollment
+    Predictor o-- FeatureEngineer : reuse frozen state
+
+    %% ---------- Cross-cutting ----------
+    ConfigLoader ..> AppConfig
+    DataSourceError --|> StockAIError
+    NotTradableError --|> StockAIError
+    ConfigError --|> StockAIError
+    ArtifactError --|> StockAIError

@@ -1,0 +1,337 @@
+%% scale-class-diagram.mermaid
+%% 大规模训练编排 + 检测编排 + 本机 UI —— 类图（增量）
+%% 关联：docs/ARCHITECTURE_SCALE_TRAINING.md §3
+classDiagram
+    direction LR
+
+    %% ===================== 异常 =====================
+    class ScaleError {
+        <<exception>>
+        +message: str
+        +context: dict
+    }
+
+    %% ===================== 配置（config/schema.py 追加）=====================
+    class ScaleTrainConfig {
+        +timesteps: int = 20000
+        +algo: str = "ppo"
+        +backend: str = "auto"
+    }
+    class ScaleDetectConfig {
+        +model_policy: str = "nearest_past"
+        +mode: str = "backtest"
+    }
+    class ScaleConfig {
+        +years: list[int] | None
+        +symbols_file: Path
+        +split_ratio: dict
+        +workers: int = 1
+        +poll_sec: float = 2.0
+        +train: ScaleTrainConfig
+        +detect: ScaleDetectConfig
+    }
+
+    %% ===================== 路径与工具 =====================
+    class ScalePaths {
+        +root: Path
+        +scale_dir: Path
+        +units_json: Path
+        +split_json: Path
+        +state_dir: Path
+        +models_dir: Path
+        +reports_dir: Path
+        +logs_dir: Path
+        +ensure() None
+        +state_of(phase) Path
+        +control_json() Path
+        +model_zip(uid) Path
+        +sidecar(uid) Path
+        +norm(uid) Path
+        +curve(uid) Path
+        +report(uid) Path
+        +report_png(uid) Path
+        +log_of(phase, ts) Path
+    }
+    class AtomicUtil {
+        <<module scale.atomic>>
+        +atomic_write_json(obj, path) Path
+        +atomic_write_text(text, path) Path
+    }
+
+    %% ===================== 单元与划分 =====================
+    class Unit {
+        +unit_id: str
+        +symbol: str
+        +year: int
+        +start: str
+        +end: str
+        +to_dict() dict
+        +from_dict(d) Unit
+        +parse(unit_id) Unit
+        +make(symbol, year) Unit
+    }
+    class SplitPlan {
+        +schema_version: int
+        +random_seed: int
+        +ratio: dict
+        +symbols_source: str
+        +symbols_count: int
+        +year_range: list[int]
+        +units_total: int
+        +units_available: int
+        +train_units: list[str]
+        +detect_units: list[str]
+        +algorithm: str
+        +config_hash: str
+        +to_dict() dict
+        +from_dict(d) SplitPlan
+        +stage_units(phase) list[str]
+    }
+
+    %% ===================== 状态与控制 =====================
+    class UnitState {
+        +status: str
+        +started_at: str
+        +finished_at: str
+        +duration_sec: float
+        +model_path: str
+        +assigned_model: str
+        +report_path: str
+        +metrics: dict
+        +seed: int
+        +data_hash: str
+        +error: str
+        +reason: str
+        +to_dict() dict
+        +from_dict(d) UnitState
+    }
+    class ScaleState {
+        +schema_version: int
+        +phase: str
+        +process_state: str
+        +pid: int
+        +created_at: str
+        +updated_at: str
+        +seed: int
+        +backend: str
+        +config_hash: str
+        +total: int
+        +counts: dict
+        +current_unit: str
+        +started_at: str
+        +elapsed_sec: float
+        +avg_unit_sec: float
+        +eta_sec: float
+        +units: dict
+        +recompute_counts() dict
+        +to_dict() dict
+        +from_dict(d) ScaleState
+    }
+    class StateStore {
+        +paths: ScalePaths
+        +load(phase) ScaleState
+        +save(state) None
+        +recover(state, verify) dict
+    }
+    class ControlSignal {
+        +phase: str
+        +cmd: str
+        +requested_at: str
+        +to_dict() dict
+        +from_dict(d) ControlSignal
+    }
+    class ControlStore {
+        +path: Path
+        +poll(phase) str
+        +write(phase, cmd) None
+        +clear() None
+    }
+
+    %% ===================== 产物与归一化存储 =====================
+    class UnitArtifacts {
+        +paths: ScalePaths
+        +model_zip(uid) Path
+        +sidecar(uid) Path
+        +norm(uid) Path
+        +curve(uid) Path
+        +report(uid) Path
+        +is_model_done(uid) bool
+        +is_report_done(uid) bool
+        +is_done(phase, uid) bool
+        +available_train_models() set
+    }
+    class NormalizerStore {
+        +paths: ScalePaths
+        +save(uid, state) Path
+        +load(uid) NormalizerState
+        +exists(uid) bool
+    }
+
+    %% ===================== 采样 =====================
+    class UnitSampler {
+        +builder: SampleBuilder
+        +sample(unit, raw_df, val_ratio) UnitSample
+    }
+    class UnitSample {
+        +train: SampleSplit
+        +val: SampleSplit
+        +state: NormalizerState
+        +n_steps: int
+        +data_hash: str
+    }
+
+    %% ===================== 扫描/模型策略 =====================
+    class UnitScanner {
+        +paths: ScalePaths
+        +builder: SampleBuilder
+        +loader: StockDataLoader
+        +scan_units(symbols, year_range) list
+        +write_units(units, status, steps) Path
+        +build_split(available, seed, ratio, chash, src, years, total) SplitPlan
+        +write_split(plan) Path
+    }
+    class ModelSelector {
+        +select(policy, symbol, detect_year, train_units, available) str
+    }
+
+    %% ===================== 执行器（Ports & Adapters）=====================
+    class UnitRunner {
+        <<interface>>
+        +run_unit(unit, raw_df, index, total) UnitState
+    }
+    class UnitTrainer {
+        +cfg
+        +paths
+        +sampler
+        +normalizers
+        +artifacts
+        +run_unit(unit, raw_df, i, n) UnitState
+    }
+    class UnitDetector {
+        +cfg
+        +paths
+        +sampler
+        +normalizers
+        +artifacts
+        +split: SplitPlan
+        +run_unit(unit, raw_df, i, n) UnitState
+    }
+
+    %% ===================== 编排骨架 =====================
+    class ScaleOrchestrator {
+        +cfg: AppConfig
+        +paths: ScalePaths
+        +phase: str
+        +store: StateStore
+        +control: ControlStore
+        +runner: UnitRunner
+        +run() int
+        +_recover(state) None
+        +_loop(state) None
+        +_handle_control(state) str
+    }
+
+    %% ===================== UI =====================
+    class ScaleUI {
+        +cfg
+        +paths
+        +host: str
+        +port: int
+        +procs: dict
+        +serve(open_browser) None
+    }
+    class ScaleRequestHandler {
+        +routes: dict
+        +do_GET() None
+        +do_POST() None
+    }
+
+    %% ===================== 既有复用点（只读依赖）=====================
+    class SampleBuilder {
+        <<reuse>>
+        +build_split(dfs, state, start, end) SampleSplit
+        +compute_data_hash(paths) str
+    }
+    class FeatureEngineer {
+        <<reuse>>
+        +fit(df) NormalizerState
+        +transform(df, state) ndarray
+    }
+    class NormalizerState {
+        <<reuse>>
+        +to_dict() dict
+        +from_dict(d) NormalizerState
+    }
+    class SampleSplit {
+        <<reuse>>
+    }
+    class StockDataLoader {
+        <<reuse>>
+        +fetch_all(...) dict
+        +load_all_cached(symbols) dict
+        +info(symbols) list
+    }
+    class TrainerFactory {
+        <<reuse>>
+        +create(cfg, env, preference) Enrollment
+    }
+    class TradingEnv {
+        <<reuse>>
+    }
+    class Backtester {
+        <<reuse>>
+        +run(backend, algo, model_path, ...) BacktestResult
+    }
+    class BacktestResult {
+        <<reuse>>
+        +to_json(path) Path
+    }
+    class StockAIError {
+        <<exception reuse>>
+    }
+
+    %% ===================== 关系 =====================
+    ScaleConfig *-- ScaleTrainConfig
+    ScaleConfig *-- ScaleDetectConfig
+    ScaleState *-- "many" UnitState
+    SplitPlan *-- Unit : train/detect units
+    UnitSample *-- NormalizerState
+    UnitSample *-- SampleSplit
+
+    StateStore --> ScalePaths
+    ControlStore --> ScalePaths
+    UnitArtifacts --> ScalePaths
+    NormalizerStore --> ScalePaths
+
+    UnitScanner --> UnitArtifacts
+    UnitScanner --> UnitSampler
+    UnitScanner --> StockDataLoader
+    UnitSampler --> SampleBuilder
+    UnitSampler --> FeatureEngineer
+
+    UnitTrainer ..|> UnitRunner
+    UnitDetector ..|> UnitRunner
+    UnitDetector --> ModelSelector
+    UnitTrainer --> NormalizerStore
+    UnitDetector --> NormalizerStore
+    UnitTrainer --> TrainerFactory
+    UnitTrainer --> TradingEnv
+    UnitDetector --> Backtester
+    UnitDetector --> SampleBuilder
+
+    ScaleOrchestrator --> StateStore
+    ScaleOrchestrator --> ControlStore
+    ScaleOrchestrator --> UnitRunner
+    ScaleOrchestrator --> ScaleState
+
+    ScaleUI --> ScaleRequestHandler
+    ScaleUI --> ScalePaths
+    ScaleRequestHandler ..> ScaleState : reads json
+    ScaleRequestHandler ..> SplitPlan : reads json
+    ScaleRequestHandler ..> ControlStore : writes control
+
+    NormalizerState ..> NormalizerStore
+    BacktestResult ..> UnitArtifacts
+
+    ScaleError --|> StockAIError
+    ScaleConfig ..> AppConfig : new field (config/schema.py)

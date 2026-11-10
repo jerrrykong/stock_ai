@@ -1,0 +1,84 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ---- Runtime artifacts ----
+data/raw/
+data/samples/
+data/meta.json
+# Protected market-data corpus (do NOT commit; ~74M, reproduced by pipeline)
+data/raw_hfq/
+data/raw_hfq_v2_train/
+data/corporate_actions/
+data/scale/
+models/
+logs/
+reports/
+
+# ---- Agent / scratch artifacts (never commit) ----
+.qa*/
+.qatmp*/
+.pytmp*/
+.smoke*/
+.qa*.txt
+.cli*.txt
+*.local.txt
+*.log
+
+# ---- outputs: keep *.py / *.md (source + reports); ignore build/runtime artifacts ----
+outputs/**/*.log
+outputs/**/*.xml
+outputs/**/*.png
+outputs/**/*.html
+outputs/**/*.csv
+outputs/**/*.cjs
+outputs/_ca_report_attempt1/
+outputs/ca-ui-fixture-*/
+outputs/probe_links/
+outputs/spotcheck/
+outputs/corporate_action_build/
+outputs/corporate_action_build_sample/
+outputs/corporate_action_build_sample_v2/
+outputs/corporate_action_build_sample_v3/
+outputs/corporate_action_build_sample_v4/
+outputs/corporate_action_direct/
+outputs/corporate_action_direct_smoke/
+outputs/corporate_action_sources/
+outputs/corporate_action_ui_acceptance_final/
+outputs/corporate_action_ui_acceptance_probe/
+outputs/corporate_action_ui_acceptance_probe2/
+outputs/model_replay_preview.html
+
+# ---- Tooling ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- Scratch / test output ----
+*.local.txt
+pytest_result.txt
+pytest_v.txt
+pytest_one.txt
+full.txt
+full2.txt
+cli2.txt
+cli_smoke_res.txt
+.pytmp/
+.pytmp*/
+.smoke/
+.smoke2/

@@ -1,0 +1,150 @@
+%% scale-sequence-diagram.mermaid
+%% 大规模训练编排 + 检测编排 + 本机 UI —— 时序图（增量）
+%% 关联：docs/ARCHITECTURE_SCALE_TRAINING.md §4
+
+%% ============================================================
+%% (a) scale units —— 生成单元与划分
+%% ============================================================
+sequenceDiagram
+    autonumber
+    participant U as 用户(PowerShell)
+    participant CLI as scale units
+    participant CFG as ConfigLoader
+    participant SC as UnitScanner
+    participant L as StockDataLoader
+    participant B as SampleBuilder
+    participant FS as data/scale/*.json
+
+    U->>CLI: python -m stock_ai scale units --seed 42
+    CLI->>CFG: load(configs/default.yaml) + merge_cli_overrides
+    CFG-->>CLI: AppConfig(scale=ScaleConfig)
+    CLI->>SC: new UnitScanner(paths, builder, loader)
+    CLI->>SC: scan_units(symbols=load_symbols(), year_range=resolve_year_range())
+    loop 每个 (symbol, year)
+        SC->>L: cache.exists(symbol)?
+        alt 缓存缺失
+            SC-->>SC: Unit(status=missing)
+        else 有缓存
+            SC->>B: build_split({symbol: raw}, state=fit(unit_window), Y0101, Y1231)
+            B-->>SC: SampleSplit(n_steps)
+            SC-->>SC: Unit(status = available | insufficient)
+        end
+    end
+    SC->>FS: write_units(units.json) 原子
+    SC->>SC: build_split(available, seed, ratio=8:2, config_hash)
+    SC->>FS: write_split(split.json) 原子, 无时钟字段→可复现
+    SC-->>CLI: 摘要(总数/可用/train/detect)
+    CLI-->>U: 打印计数 + 路径
+
+%% ============================================================
+%% (b) scale train —— 逐单元训练 + 中断 + 续跑
+%% ============================================================
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant CL as scale train
+    participant OR as ScaleOrchestrator
+    participant SS as StateStore(train.json)
+    participant CS as ControlStore(control.json)
+    participant UT as UnitTrainer
+    participant NS as NormalizerStore
+    participant TF as TrainerFactory/TradingEnv
+    participant AR as UnitArtifacts
+
+    U->>CL: python -m stock_ai scale train
+    CL->>OR: new ScaleOrchestrator(phase=train, runner=UnitTrainer)
+    OR->>SS: load(train) 不存在→初始化(total=len(train_units))
+    OR->>OR: _recover(): running→校验产物→done/pending 崩溃恢复扫描
+    OR->>SS: save(process_state=running, pid)
+    loop 每个 train_unit 严格串行
+        OR->>CS: poll(train) 单元边界轮询
+        alt cmd == pause
+            OR->>SS: save(process_state=paused) ; 等待 resume
+        else cmd == stop
+            OR->>SS: save(process_state=stopped) ; break
+        end
+        alt AR.is_done(train, uid) == True 状态+产物双校验
+            OR->>OR: 跳过 绝不覆盖
+        else 需训练
+            OR->>SS: mark_running(uid) + save
+            OR->>UT: run_unit(unit, raw_df, i, total)
+            UT->>UT: sampler.sample(unit) → fit NormalizerState(单元窗口)
+            UT->>NS: save(uid, state) → models/units/<uid>.norm.json
+            UT->>TF: TradingEnv(train_split) + TrainerFactory.create()
+            TF-->>UT: trainer.learn(timesteps)
+            UT->>UT: save(models/units/<uid>.zip) + sidecar + curve.png
+            UT-->>OR: UnitState(done, duration, data_hash)
+            OR->>SS: mark_done(uid) + recompute_counts/ETA + save
+        end
+        Note over OR,SS: 异常→mark_failed(uid,error)，整批继续 单元级隔离
+    end
+    OR->>SS: save(process_state=finished|stopped) + elapsed/eta
+    OR-->>CL: exit code
+    Note over U,OR: Ctrl+C → KeyboardInterrupt → 当前单元回滚 pending → 优雅退出; 重启 → 跳过 done
+
+%% ============================================================
+%% (c) scale detect —— 选模型 + 回测（复用训练时 NormalizerState）
+%% ============================================================
+sequenceDiagram
+    autonumber
+    participant OR as ScaleOrchestrator(phase=detect)
+    participant SP as SplitPlan(split.json)
+    participant MS as ModelSelector
+    participant AR as UnitArtifacts
+    participant UD as UnitDetector
+    participant NS as NormalizerStore
+    participant B as SampleBuilder
+    participant BT as Backtester
+    participant RP as reports/units/<uid>.json
+
+    loop 每个 detect_unit
+        OR->>UD: run_unit(unit, raw_df, i, n)
+        UD->>SP: train_units 同代码训练组
+        UD->>AR: available_train_models()
+        UD->>MS: select(policy, symbol, detect_year, train_units, available)
+        alt 无匹配模型
+            MS-->>UD: ""
+            UD-->>OR: UnitState(status=skipped, reason="no_model:...")
+        else 命中 assigned_unit
+            UD->>NS: load(assigned_unit) → NormalizerState 训练时持久化, 绝不重新 fit (Q2)
+            UD->>B: build_split({symbol: raw}, state=assigned_norm, Y0101, Y1231)
+            B-->>UD: detect SampleSplit
+            UD->>BT: Backtester(model, cfg.env, detect_split).run()
+            BT-->>UD: BacktestResult(metrics, equity_curve)
+            UD->>RP: to_json() 原子 [equity PNG 可选]
+            UD-->>OR: UnitState(done, assigned_model, report_path, metrics)
+        end
+        OR->>OR: 更新 detect 状态 + ETA
+    end
+
+%% ============================================================
+%% (d) UI 启动 / 暂停 / 继续 / 停止 控制链路
+%% ============================================================
+sequenceDiagram
+    autonumber
+    participant U as 用户(浏览器)
+    participant H as ScaleRequestHandler
+    participant SU as ScaleUI
+    participant CS as ControlStore(control.json)
+    participant OR as scale train 子进程
+    participant SS as StateStore
+
+    U->>H: GET / → 单页 index.html
+    U->>H: 点击「启动训练」POST /api/control {phase:train, action:start}
+    H->>SU: start(phase=train)
+    SU->>OR: subprocess.Popen(python -m stock_ai scale train) 仅一次, 不自启
+    SU-->>U: {ok, pid}
+    loop 每 poll_sec
+        H->>SS: GET /api/status?phase=train → 读 state 文件
+        SS-->>U: counts/ETA/current_unit/process_state 刷新<2s
+    end
+    U->>H: 点击「暂停」POST {phase:train, action:pause}
+    H->>CS: write(phase=train, cmd=pause)
+    OR->>CS: 单元边界 poll → paused 不新开单元, 已完成不变
+    U->>H: 点击「继续」POST {action:resume}
+    H->>CS: write(cmd=resume)
+    OR->>CS: poll → resume → 继续剩余 pending
+    U->>H: 点击「停止」POST {action:stop}
+    H->>CS: write(cmd=stop)
+    OR->>CS: poll → stop_requested → 当前单元回滚/落盘 → stopped
+    Note over U,OR: UI 仅写 control.json / 起一次子进程; 不注册服务, 不自启

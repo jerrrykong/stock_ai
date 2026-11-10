@@ -1,0 +1,194 @@
+# =============================================================================
+# 特征增量实验冻结参数（T01 · 只读契约基础设施）
+# -----------------------------------------------------------------------------
+# 来源：
+#   outputs/feature_data_plan.md §6 T01 验收(588)、§7.1 台架口径(600-604)、
+#     §7.2 判据/止损(608-617)、§7.3 单变量冻结清单(619-621)、§10 共享约定(703-720)
+#   outputs/feature_data_prd.md v2 §2.1⑦ 数据前提断言、§4.2 主判据、
+#     §4.3 辅判据、§4.4 八条止损、§5 Q3/Q4/Q9/Q10（用户已确认）
+# 权威参考实现（只读，不改）：
+#   outputs/diagnose_residual_overfit_vs_regime.py:27-58, 94-106, 203-229
+#   outputs/timing_backtest.py:54-79, 153-217
+#   src/stock_ai/scale/unified.py:26-29, 75-107
+# 冻结语义：以下任一项变动即中止实验（plan §7.3）；P0 阶段不扩池、不重拉、
+#   不调训练超参。新增特征必然改 FEATURES/observation_shape → 必须新 run，
+#   绝不对 v3/v4 旧 run 传 resume=True（Q3/Q4 已确认）。
+# 注意：PyYAML 按 YAML 1.1 解析，科学计数法必须带小数点（1.0e-12），
+#   否则 "1e-3" 会被当成字符串；本文件数值统一写成十进制或带点指数。
+# =============================================================================
+
+version: 1
+
+# ---- 数据目录与口径锁定（plan §1.4 / §2.4 / §3.5 / §10）-------------------
+data:
+  # 197 只训练池，后复权 OHLCV + 真实成交额；唯一金额分子来源
+  feature_dir: data/raw_hfq_v2_train
+  # 未复权 OHLC（严格撮合执行价）；唯一价格分母来源
+  raw_dir: data/raw
+  # 金额分子：显式锁定 hfq 目录的真实 amount（std≈0.0095，vwap 落在 raw [low,high] ≥99.6%）
+  amount_source: data/raw_hfq_v2_train
+  # 价格分母：显式锁定 data/raw 未复权 OHLC
+  price_denominator_source: data/raw
+  n_symbols: 197
+  # 硬禁用项（plan §0.2 / §10；PRD v2 §1.1 口径修正框）
+  disabled:
+    - "禁用 data/raw 的 amount：合成值 close×volume，std=0，vwap≡close_raw → 常数假特征"
+    - "禁用 close_hfq 作金额特征的价格分母：hfq/raw 收盘比 26.5~159.4 倍且随复权因子漂移"
+  # 训练池由 prepare_v2_training_inputs.py:76 保证两目录日期集合相等，
+  # 交叉对齐统一 %Y%m%d 8 位字符串键，严禁 20060104 与 2006-01-04 混用
+  day_key_format: "%Y%m%d"
+
+# ---- 切分（参考实现 :34-35 DEFAULT_RANGES / SPLITS）------------------------
+splits:
+  train: [2006, 2021]
+  val: [2022, 2023]
+  test: [2024, 2025]
+
+# ---- train 内部 70/30 时间外推（参考实现 :203-229）------------------------
+extrapolation:
+  train_year_start: 2006
+  train_year_end: 2021
+  n_train_years: 16
+  ratio: 0.7
+  # cut = int(16 * 0.7) = 11
+  cut: 11
+  # 拟合段 2006-2016（11 年）
+  early_fit_years: [2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016]
+  # 评估段 2017-2021（5 年）
+  late_eval_years: [2017, 2018, 2019, 2020, 2021]
+  # 监督标签（仅用于拟合，不进特征）：fwd = close.shift(-20)/close - 1，|fwd| < 1.0，y = 1{fwd>0}
+  fwd_abs_max: 1.0
+
+# ---- 冻结项（plan §7.3 / §10；任何一项变动即中止）-------------------------
+frozen:
+  seed: 20261020               # 含 logreg / TimingBacktest.self_check 随机确定性
+  cost: 0.003                  # 往返摩擦 0.3%（Q10 已确认）
+  rebalance: 20                # 调仓间隔（Q10 已确认）
+  horizon: 20                  # 标签前瞻窗口，仅用于 fwd，不进特征
+  threshold: 0.5               # 概率 → 目标仓位阈值
+  clip: 10                     # normalizer Z = clip((X-mean)/std, -10, 10)
+  min_len: 40                  # TimingBacktest episode 最少交易日数
+  normalizer_fit: early        # mean/std 只用 early(2006-2016) 拟合，std<=0 → 1
+  logreg:
+    epochs: 250
+    lr: 0.05
+    l2: 0.001
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    logit_clip: 30
+
+# ---- 两个对照基线（plan §7.2 / PRD §4.2；T02 复现，T01 不跑）-------------
+controls:
+  base:
+    value: 0.0085              # 现状 9 特征时间外推毛超额 +0.85%
+    tolerance: 0.002           # 复现容差（超阈即 abort）
+    description: "现状 9 特征基线（主判据门槛）"
+  negative:
+    value: -0.0598             # 已失败的市场 beta 残差特征 −5.98%（阴性对照）
+    tolerance: 0.005
+    description: "已证伪项复现校准；残差列禁止进注册表/契约/生产特征集（plan §7.6）"
+
+# ---- 主判据（唯一决定有效性；Q9 已确认）-----------------------------------
+main_criterion:
+  metric: late_gross_excess
+  gross_excess_min: 0.0        # gross_excess > 0
+  base_value: 0.0085           # 且 > 现状基线 +0.85%
+  must_exceed_base: true
+  zero_trade_fraction_max: 0.05
+  turnover_multiple_max: 1.5
+  # IC / 监督学习仅作诊断字段，绝不参与 evaluate 判定
+  ic_and_supervised_are_diagnostics_only: true
+  # 退化守卫：只看 mean_excess_return_traded，不用「全部超额」（含零交易 episode）
+  degenerate_zero_trade_fraction: 0.05
+
+# ---- 三条数据前提断言阈值（plan §3.5 / PRD §2.1⑦）------------------------
+#  ① std(amount/(volume×close_raw)) > std_min              挡合成值（std=0）
+#  ② 占比(vwap=amount/volume ∈ [low_raw,high_raw]) > vwap_in_range_min   挡口径错配
+#  ③ vwap!=close_raw 占比显著>0、std(vwap_dev)>0、且与 volume_relative 的
+#     corr 显著 <1（collinearity_max）                    挡常数/共线假特征
+assertions:
+  std_min: 0.001
+  vwap_in_range_min: 0.99
+  # 价格精度容差（实现细节，非冻结阈值）：实测 3 只次新股严格占比 0.9804/0.9889/0.9893，
+  # 其超界行的中位相对偏离为 0（纯四舍五入），加 0.5% 相对容差后 197/197 全部 ≥0.99；
+  # 目录级严格占比 0.99887 亦通过。该容差对价格/成交量整体缩放保持不变。
+  vwap_range_tolerance: 0.005
+  # 挡浮点噪声：data/raw 合成 amount 场景 std(vwap_dev)=5.29e-17 应判失败
+  vwap_dev_std_min: 1.0e-6
+  vwap_ne_close_ratio_min: 0.9   # 「显著 >0」的冻结实现口径（实测 ≥0.9959）
+  collinearity_max: 0.99         # |corr(vwap_dev, volume_relative)| 必须显著 <1
+
+# ---- 8 条止损阈值参数（plan §7.2 / PRD §4.4）------------------------------
+stop_rules:
+  turnover_multiple_max: 1.5     # ② 毛正但换手 >1.5×现状且净<0 → 拟合噪声
+  zero_trade_fraction_max: 0.05  # ⑤ 零交易占比 >5% → 退化
+  timing_skill_min: 0.0          # ⑤ 择时技能项 ≤0 → 退化
+  yearly_top1_share_max: 0.8     # ③ 正超额集中于单个年份的占比上限 → 过拟合
+  excluded_evidence_years: [2006, 2007]  # ⑦ 该段数字不作「有效」依据
+  friction_drag_exceeds_gross_is_invalid: true  # 毛超额 < 摩擦拖累直接判无效
+  ic_never_overrides_main_criterion: true       # ⑥ IC 稳定但毛超额不达标即无效
+  data_precondition_required: true              # ⑧ 断言任一不通过 → 直接止损，不进回测
+
+# ---- 构造参数快照（plan §2.4 generator_params / §3.4）---------------------
+generator_params:
+  epsilon: 1.0e-12
+  gap_threshold_c: 1.5         # vol_gap_freq20 的 c（PRD §2.4）
+  windows:
+    liquidity: {amihud_z: 20, amt_rank: 250, amt_logratio: 250, vwap_dev_ma: 5, pv_div: 20}
+    overnight: {ma: 5, vol: 20, overnight_share: 20}
+    candlestick: {ma: 5}
+    volatility: {window: 20, gap_c: 1.5}
+  # 零分母一律用 where= 判定 + 默认值兜底，绝不用「分母 + ε」
+  # （绝对 ε 在整体缩放下会破坏 atol=1e-12 的缩放不变性）
+  zero_denominator_policy: "where_divide_with_default"
+
+# ---- 契约升级（Q3/Q4 已确认：不落盘派生目录 + 新 run_id）-----------------
+contract:
+  contract_v2: unified-relative-v2
+  feature_set_id_template: "v2-{family}"
+  contract_id_template: "unified-relative-v2+{feature_set_id}"
+  default_groups: [base]
+  resume_allowed: false         # 绝不提供 --resume，绝不对 v3/v4 旧 run 续训
+
+# ---- 允许注册的特征族（plan §2.2；account 仅注册列名、运行时注入）-------
+feature_groups_allowed: [base, liquidity, overnight, candlestick, volatility, account]
+feature_groups_persisted: [liquidity, overnight, candlestick, volatility]
+# P1 仅预留前缀，本轮不实现（不注册、不构造）
+reserved_prefixes: [inst_, cal_, ca_]
+
+# ---- 明确禁止清单（plan §0.3 / §10；PRD §3.4）----------------------------
+forbidden:
+  - "市场指数 / 大盘上下文作为独立特征列（improvement_plan §1.9）"
+  - "市场 beta 残差特征（§1.16）"
+  - "regime 门控（§1.18）"
+  - "联合量 regime × 个股位置（§1.9）"
+  - "横截面选股（§1.12）"
+  - "加大训练量 / 调参重训（§2 方案 A）"
+  - "单靠降换手 / 降摩擦（§1.11 / §1.14）"
+  - "把 IC 稳定或 val 单点当验收判据（§1.10 / §1.16）"
+  - "用『全部超额』（含零交易 episode）评估（§4 误区 1）"
+  - "任何未来日历信息 / days_to_next_ex / 距下一节假日（§2.7 / §2.8）"
+  - "data/raw 的 amount 用于任何金额型特征（合成值 std=0）"
+  - "close_hfq 作金额特征的价格分母"
+  - "对 v3/v4 旧 run 传 resume=True 续训"
+
+# ---- T01 交付边界（本轮只搭台架，不跑实验）-------------------------------
+t01_scope:
+  creates_only:
+    - outputs/feature_experiments.yaml
+    - outputs/feature_families.py
+    - outputs/verify_amount_precondition.py
+    - outputs/feature_experiment_harness.py
+  no_backtest: true
+  no_training: true
+  no_derived_parquet: true
+  no_writeback: true
+  no_new_run: true
+  todo_t02:
+    - "outputs/reproduce_controls.py：复现 base +0.85% / 阴性 −5.98%"
+    - "feature_experiment_harness.reproduce_controls()"
+    - "feature_experiment_results/baselines.json、self_check.json"
+  todo_t03:
+    - "outputs/run_feature_experiments.py：P0-1→P0-4 逐族单变量编排"
+    - "feature_experiment_results/{feature_set_id}/comparison.csv / yearly_decomp.csv / metrics.json / verdict.json"
+    - "结果写盘与 verdict 汇总（本轮不实现、不创建目录）"

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>stock_ai · 大规模训练控制台</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --line:#2b3543; --fg:#e6edf3; --mut:#8b98a5;
+          --acc:#3b82f6; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Microsoft YaHei","Segoe UI",sans-serif; background:var(--bg); color:var(--fg); font-size:14px; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  .pill { padding:2px 10px; border-radius:10px; font-size:12px; background:#26303d; color:var(--mut); }
+  .dot { width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px; }
+  .running .dot{background:var(--ok)} .stopped .dot{background:var(--mut)} .paused .dot{background:var(--warn)}
+  nav { display:flex; gap:4px; padding:8px 20px 0; background:var(--panel); border-bottom:1px solid var(--line); }
+  nav button { background:none;border:none;color:var(--mut);padding:8px 14px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent; }
+  nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
+  main { padding:16px 20px 40px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+  .card h3 { margin:0 0 10px; font-size:14px; font-weight:600; }
+  .bar { height:10px; background:#26303d; border-radius:5px; overflow:hidden; margin:8px 0; }
+  .bar > span { display:block; height:100%; background:var(--acc); width:0%; transition:width .3s; }
+  .kv { display:flex; flex-wrap:wrap; gap:14px; color:var(--mut); font-size:13px; }
+  .kv b { color:var(--fg); }
+  .btns { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  button.act { background:#26303d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 14px;cursor:pointer; }
+  button.act:hover { border-color:var(--acc); }
+  button.act.pri { background:var(--acc); border-color:var(--acc); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  thead th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--panel); }
+  .toolbar { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+  input,select { background:#0f1419;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 10px; }
+  .scroll { max-height:480px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
+  .st-done{color:var(--ok)} .st-failed{color:var(--err)} .st-running{color:var(--acc)}
+  .st-skipped{color:var(--warn)} .st-pending{color:var(--mut)}
+  pre.log { background:#0f1419;border:1px solid var(--line);border-radius:8px;padding:12px;max-height:520px;overflow:auto;font-size:12px;line-height:1.5; }
+  .muted{color:var(--mut)} .right{margin-left:auto}
+  img.curve{max-width:100%;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+  .err{color:var(--err)}
+  .replay-warning{border:1px solid var(--warn);color:#fcd58b;background:#332819;padding:12px;line-height:1.7;margin:12px 0;border-radius:6px;white-space:pre-line}
+  .replay-risk{border:2px solid var(--err);color:#ffb9b9;background:#3b2026}
+  #replay-chart{height:810px;width:100%}
+  #replay-detail{white-space:pre-wrap;line-height:1.7}
+  #replay-daily tr,#replay-trades tr{cursor:pointer}
+  #replay-daily tr.selected{background:#253b55}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}main{padding:12px 8px}.toolbar label{width:100%}}
+</style>
+</head>
+<body>
+<header>
+  <h1>stock_ai · 大规模训练控制台</h1>
+  <span class="pill" id="addr"></span>
+  <span class="pill" id="proc"><span class="dot"></span><span id="procTxt">空闲</span></span>
+  <span class="pill right" id="updated">-</span>
+</header>
+
+<nav>
+  <button data-tab="overview" class="active">概览</button>
+  <button data-tab="units">单元</button>
+  <button data-tab="detect">检测</button>
+  <button data-tab="data">数据</button>
+  <button data-tab="logs">日志</button>
+  <button data-tab="replay">模型回放</button>
+  <button data-tab="unified">统一模型训练</button>
+</nav>
+
+<main>
+  <!-- 概览 -->
+  <section id="tab-overview">
+    <div class="grid">
+      <div class="card" id="card-train">
+        <h3>训练阶段 (train)</h3>
+        <div class="bar"><span id="train-bar"></span></div>
+        <div class="kv">
+          <span>完成 <b id="train-done">0</b></span>
+          <span>失败 <b id="train-failed">0</b></span>
+          <span>跳过 <b id="train-skipped">0</b></span>
+          <span>剩余 <b id="train-remain">0</b></span>
+        </div>
+        <div class="kv" style="margin-top:6px">
+          <span>当前 <b id="train-cur">-</b></span>
+          <span>ETA <b id="train-eta">-</b></span>
+        </div>
+        <div class="btns">
+          <button class="act pri" onclick="ctl('train','start')">▶ 启动训练</button>
+          <button class="act" onclick="ctl('train','pause')">⏸ 暂停</button>
+          <button class="act" onclick="ctl('train','resume')">⏵ 继续</button>
+          <button class="act" onclick="ctl('train','stop')">⏹ 停止</button>
+        </div>
+      </div>
+      <div class="card" id="card-detect">
+        <h3>检测阶段 (detect)</h3>
+        <div class="bar"><span id="detect-bar"></span></div>
+        <div class="kv">
+          <span>完成 <b id="detect-done">0</b></span>
+          <span>失败 <b id="detect-failed">0</b></span>
+          <span>跳过 <b id="detect-skipped">0</b></span>
+          <span>剩余 <b id="detect-remain">0</b></span>
+        </div>
+        <div class="kv" style="margin-top:6px">
+          <span>当前 <b id="detect-cur">-</b></span>
+          <span>ETA <b id="detect-eta">-</b></span>
+        </div>
+        <div class="btns">
+          <button class="act pri" onclick="ctl('detect','start')">▶ 启动检测</button>
+          <button class="act" onclick="ctl('detect','pause')">⏸ 暂停</button>
+          <button class="act" onclick="ctl('detect','resume')">⏵ 继续</button>
+          <button class="act" onclick="ctl('detect','stop')">⏹ 停止</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px" id="card-unified">
+      <h3>统一模型训练 (unified) <span class="pill" id="u-state">-</span></h3>
+      <div class="bar" style="height:14px"><span id="u-bar"></span></div>
+      <div class="kv">
+        <span>进度 <b id="u-prog">-</b></span>
+        <span>步数 <b id="u-steps">-</b></span>
+        <span>速度 <b id="u-speed">-</b></span>
+        <span>ETA <b id="u-eta">-</b></span>
+        <span>已运行 <b id="u-elapsed">-</b></span>
+        <span>checkpoint <b id="u-ckpt">-</b></span>
+      </div>
+      <div class="kv" style="margin-top:6px">
+        <span>run <b id="u-run">-</b></span>
+        <span>子进程 <b id="u-proc">-</b></span>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="showTab('unified')">打开统一模型训练页</button>
+        <button class="act pri" onclick="openUnifiedReplay(true)">查看最新综合模型表现 / 持仓</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>划分摘要 (split.json)</h3>
+      <div class="kv" id="split-summary"><span class="muted">尚未生成 split.json</span></div>
+      <div class="muted" id="ctl-msg" style="margin-top:8px"></div>
+    </div>
+  </section>
+
+  <section id="tab-unified" style="display:none">
+    <div class="card">
+      <h3>统一模型训练：跨股票 / 跨时期共享一个 PPO</h3>
+      <p class="muted">只读所有股票缓存；train 2006–2021 / val 2022–2023 / test 2024–2025。逐股票相对特征，全局 normalizer 仅 fit train；每个股票年度独立 episode。旧单元训练不变。</p>
+      <div class="toolbar">
+        <label>累计目标步数 <input id="unified-steps" type="number" min="1" max="100000000" value="200000" /></label>
+        <label>已有 run <select id="unified-run"><option value="">新建 run</option></select></label>
+        <label>新 run 执行口径 <select id="unified-execution">
+          <option value="strict-ca" selected>公司行为 v2 · T+1 开盘（需已核验账本）</option>
+          <option value="strict">旧严格 v1 · 遗漏公司行为（仅旧语义研究）</option>
+          <option value="legacy">旧同日收盘 · 遗漏公司行为（仅旧语义研究）</option>
+        </select></label>
+      </div>
+      <p class="muted">新 run 默认使用公司行为 v2；账本未核验、覆盖不足或存在不支持事件会拒绝，不会自动补数或降级。续训沿用该 run 冻结执行版本，不受此处选择影响。选择口径不会自动开始训练。</p>
+      <div class="btns">
+        <button class="act pri" onclick="unifiedCtl('start',false)">启动新 run</button>
+        <button class="act" onclick="unifiedCtl('start',true)">从选中 run 续训</button>
+        <button class="act" onclick="unifiedCtl('pause')">暂停并 checkpoint</button>
+        <button class="act" onclick="unifiedCtl('resume')">继续</button>
+        <button class="act" onclick="unifiedCtl('stop')">停止并保存</button>
+        <button class="act pri" onclick="openUnifiedReplay()">回放选中模型 · 交易 / 持仓明细</button>
+      </div>
+      <div class="bar" style="height:16px"><span id="unified-bar"></span></div>
+      <div class="kv" id="unified-summary" role="status" style="font-size:14px"></div>
+      <div class="grid" style="margin-top:12px">
+        <div class="card">
+          <h3>实时指标</h3>
+          <div class="kv" id="unified-kpi"></div>
+        </div>
+        <div class="card">
+          <h3>训练损失曲线</h3>
+          <div id="unified-chart" style="height:260px"></div>
+          <div class="muted" id="unified-chart-note"></div>
+        </div>
+      </div>
+      <details style="margin-top:12px">
+        <summary class="muted">展开完整状态 JSON</summary>
+        <pre id="unified-detail" class="log"></pre>
+      </details>
+      <div id="unified-msg" class="muted"></div>
+      <p class="muted">查看表现：在“已有 run”中选定模型，点击“回放选中模型”，再选股票和日期。回放只读，不启动训练；未选 run 时优先使用最新可用综合模型。暂停/停止在 step 边界响应；续训不恢复环境/RNG精确轨迹。产物 models/unified/&lt;run_id&gt;/；日志 logs/scale/unified.log。</p>
+    </div>
+  </section>
+
+  <!-- 单元 -->
+  <section id="tab-units" style="display:none">
+    <div class="toolbar">
+      <input id="u-q" placeholder="搜索 代码/年份" oninput="loadUnits()" />
+      <select id="u-status" onchange="loadUnits()">
+        <option value="">全部状态</option>
+        <option value="pending">pending</option>
+        <option value="running">running</option>
+        <option value="done">done</option>
+        <option value="failed">failed</option>
+        <option value="skipped">skipped</option>
+      </select>
+      <select id="u-phase" onchange="loadUnits()">
+        <option value="train">训练</option>
+        <option value="detect">检测</option>
+      </select>
+      <span class="pill" id="u-total">共 0</span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>unit_id</th><th>状态</th><th>耗时(s)</th><th>模型/报告</th><th>assigned</th><th>原因/错误</th><th>曲线</th></tr></thead>
+        <tbody id="u-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 检测（复用单元表，聚焦 detect） -->
+  <section id="tab-detect" style="display:none">
+    <div class="toolbar">
+      <input id="d-q" placeholder="搜索 代码/年份" oninput="loadDetect()" />
+      <button class="act" onclick="loadDetect()">刷新</button>
+      <span class="pill" id="d-total">共 0</span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>unit_id</th><th>状态</th><th>assigned_model</th><th>年化</th><th>回撤</th><th>夏普</th><th>原因/错误</th><th>曲线</th></tr></thead>
+        <tbody id="d-body"><tr><td colspan="8" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 数据 -->
+  <section id="tab-data" style="display:none">
+    <div class="card">
+      <h3>缓存概览</h3>
+      <div class="kv" id="data-summary"><span class="muted">加载中…</span></div>
+    </div>
+    <div class="scroll" style="margin-top:12px">
+      <table>
+        <thead><tr><th>symbol</th><th>rows</th><th>start</th><th>end</th><th>缺失</th><th>来源</th><th>复权</th></tr></thead>
+        <tbody id="data-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" style="display:none">
+    <div class="toolbar">
+      <select id="l-phase" onchange="loadLogs()">
+        <option value="train">train</option>
+        <option value="detect">detect</option>
+      </select>
+      <button class="act" onclick="loadLogs()">刷新</button>
+      <span class="pill" id="l-file"></span>
+    </div>
+    <pre class="log" id="l-body">加载中…</pre>
+  </section>
+  <section id="tab-replay" style="display:none">
+    <div class="card">
+      <h3>缓存模型研究回放（只读，不触发训练）</h3>
+      <form id="replay-form" class="toolbar">
+        <label>缓存股票 <select id="replay-symbol" required></select></label>
+        <label>起始 <input id="replay-start" type="date" required /></label>
+        <label>结束 <input id="replay-end" type="date" required /></label>
+        <label>模型 <select id="replay-model"><option value="auto">自动：同代码且年份严格早于起始年</option></select></label>
+        <label><input id="replay-ca-research" type="checkbox" disabled /> 公司行为修正研究回放（旧模型不重训）</label>
+        <button id="replay-run" class="act pri" type="submit">运行回放</button>
+        <button id="replay-catalog-refresh" class="act" type="button">刷新股票/模型列表</button>
+        <button id="replay-latest" class="act" type="button">选择最新综合模型</button>
+      </form>
+      <div class="toolbar" aria-label="回放日期快捷选择">
+        <span class="muted">日期快捷选择（可继续手改）：</span>
+        <button class="act" type="button" id="replay-range-val">验证期</button>
+        <button class="act" type="button" id="replay-range-test">测试期</button>
+      </div>
+      <p id="replay-model-note" class="muted"></p>
+      <div id="replay-execution-note" class="replay-warning">请先选择模型。综合模型按产物记录的执行版本回放，不会因查看历史而重新训练。不同股票/区间各自从空仓开始，跨年区间连续持仓、不逐年重置；仅使用本地缓存。</div>
+      <div id="replay-selection-warning" class="replay-warning" hidden></div>
+      <div id="replay-status" role="status" aria-live="polite">请刷新列表并选择缓存日期区间。最多 2500 个交易日 / 3660 个自然日。</div>
+      <div id="replay-warnings" class="replay-warning" hidden></div>
+      <div id="replay-ca-note" class="replay-warning" hidden></div>
+      <div id="replay-summary" class="kv" style="margin-top:12px"></div>
+    </div>
+    <div id="replay-result" hidden>
+      <div class="toolbar" style="margin-top:14px" aria-label="导出本次回放数据">
+        <button class="act" type="button" id="replay-export-daily">导出逐日持仓 CSV</button>
+        <button class="act" type="button" id="replay-export-trades">导出成交明细 CSV</button>
+        <button class="act" type="button" id="replay-export-json">导出完整回放 JSON</button>
+        <span class="muted">导出当前已完成的回放，不受之后修改筛选条件影响。金额单位：元（CNY）；持股单位：股。</span>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>K 线 / 成交量 / 仓位 / 权益联动（滚轮、拖动或底部滑块缩放）</h3>
+        <p class="muted">红涨绿跌；空心三角为买卖信号，实心圆为实际模拟成交。悬停联动，点击图表或表格查看当日详情。</p>
+        <div id="replay-chart"></div>
+        <p id="replay-baseline-note" class="muted"></p>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>逐日详情</h3>
+        <div class="toolbar"><button class="act" id="replay-prev">上一日</button><input id="replay-day" type="range" min="0" value="0" /><button class="act" id="replay-next">下一日</button></div>
+        <div id="replay-detail"></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>逐日持仓与账户（按当日收盘估值）</h3>
+        <p class="muted">“当日信号”和“当日执行”分列：严格版本用前一交易日信号在当日开盘撮合；拒单不会记作成交。v2 持股含待上市锁股，总权益含股息应收，浮动盈亏不含单列股息累计；旧 v1 遗漏公司行为，不能视为投资总回报。点击任一行联动图表与逐日详情。</p>
+        <div class="scroll"><table><thead><tr><th>日期</th><th>当日信号</th><th>执行来源日</th><th>当日执行</th><th>成交 / 未成交原因</th><th>现金 ¥</th><th>持股</th><th>仓位</th><th>持仓市值 ¥</th><th>成本 / 股 ¥</th><th>浮动盈亏 ¥</th><th>权益 ¥</th><th>日收益</th><th>回撤</th><th>当日费用 ¥</th><th>当日滑点 ¥</th><th>基线 ¥</th><th id="replay-ca-head-available" hidden>可卖股数</th><th id="replay-ca-head-locked" hidden>待上市锁股</th><th id="replay-ca-head-receivable" hidden>股息应收 ¥</th><th id="replay-ca-head-dividend" hidden>税前股息累计 ¥</th><th id="replay-ca-head-events" hidden>公司行为</th></tr></thead><tbody id="replay-daily"></tbody></table></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>实际模拟成交表（非信号表）</h3>
+        <div class="scroll"><table><thead><tr><th>信号日</th><th>成交日</th><th>方向</th><th>参考开盘价 ¥</th><th>成交价 ¥</th><th>股数</th><th>金额 ¥</th><th>费用 ¥</th><th>滑点成本 ¥</th><th>已实现盈亏 ¥</th></tr></thead><tbody id="replay-trades"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtEta = (s) => { s = Math.max(0, Math.round(s||0)); if(s<60) return s+"s";
+  const m=Math.floor(s/60), h=Math.floor(m/60); if(h>0) return h+"h"+String(m%60).padStart(2,"0")+"m"; return m+"m"+(s%60)+"s"; };
+
+document.getElementById("addr").textContent = location.host;
+
+// Tabs
+function showTab(name) {
+  document.querySelectorAll("nav button").forEach(x => {
+    x.classList.toggle("active", x.dataset.tab === name);
+  });
+  ["overview","units","detect","data","logs","replay","unified"].forEach(n =>
+    $("tab-"+n).style.display = (n===name) ? "" : "none");
+  if(name==="units") loadUnits();
+  if(name==="detect") loadDetect();
+  if(name==="data") loadData();
+  if(name==="logs") loadLogs();
+  if(name==="replay") window.scaleReplay.open();
+  // 图表在隐藏容器里初始化会得到 0 尺寸，切回时需重算
+  if(name==="unified" && _uChart) _uChart.resize();
+}
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  showTab(b.dataset.tab);
+  history.replaceState(null, '', '#' + b.dataset.tab);
+});
+
+async function openUnifiedReplay(latest = false) {
+  showTab('replay');
+  history.replaceState(null, '', '#replay');
+  const run = latest ? '' : $('unified-run').value;
+  await window.scaleReplay.selectModel(run ? 'unified:' + run : null);
+}
+
+function setPhase(prefix, s) {
+  const c = s.counts || {}; const done = c.done||0; const total = s.total||0;
+  const pct = total ? Math.round(done*100/total) : 0;
+  $(prefix+"-bar").style.width = pct + "%";
+  $(prefix+"-done").textContent = done;
+  $(prefix+"-failed").textContent = c.failed||0;
+  $(prefix+"-skipped").textContent = c.skipped||0;
+  $(prefix+"-remain").textContent = s.remaining||0;
+  $(prefix+"-cur").textContent = s.current_unit || "-";
+  $(prefix+"-eta").textContent = fmtEta(s.eta_sec);
+}
+
+async function refreshStatus() {
+  try {
+    const [tr, de] = await Promise.all([
+      fetch("/api/status?phase=train").then(r=>r.json()),
+      fetch("/api/status?phase=detect").then(r=>r.json()),
+    ]);
+    setPhase("train", tr); setPhase("detect", de);
+    const sp = tr.split || {};
+    $("split-summary").innerHTML = sp.train===undefined ? '<span class="muted">尚未生成 split.json</span>' :
+      `<span>种子 <b>${sp.random_seed}</b></span><span>年份 <b>${(sp.year_range||[]).join("~")}</b></span>
+       <span>可用单元 <b>${sp.units_available}</b></span><span>训练 <b>${sp.train}</b></span>
+       <span>检测 <b>${sp.detect}</b></span><span>比例 <b>${JSON.stringify(sp.ratio)}</b></span>
+       <span>指纹 <b>${(sp.config_hash||"").slice(0,18)}…</b></span>`;
+    const anyRun = tr.running || de.running;
+    $("proc").className = "pill " + (anyRun ? "running" : "stopped");
+    $("procTxt").textContent = anyRun ? "进程运行中" : "空闲";
+    $("updated").textContent = "更新 " + new Date().toLocaleTimeString();
+  } catch(e) { $("updated").textContent = "刷新失败"; }
+}
+
+async function ctl(phase, action) {
+  try {
+    const r = await fetch("/api/control", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({phase, action})});
+    const j = await r.json();
+    $("ctl-msg").textContent = `[${phase}/${action}] ${j.msg || (j.ok?"ok":"失败")}`;
+    refreshStatus();
+  } catch(e) { $("ctl-msg").textContent = "控制失败: " + e; }
+}
+
+function rowsForUnits(items, detect) {
+  return items.map(u => {
+    const st = `<span class="st-${u.status}">${u.status}</span>`;
+    if (detect) {
+      const m = u.metrics || {};
+      const pct = (x) => (x===undefined||x===null) ? "-" : (x*100).toFixed(2)+"%";
+      const curve = u.status==="done" ? `<a class="muted" href="/api/plot?unit_id=${u.unit_id}&kind=equity" target="_blank">资金曲线</a>` : "-";
+      return `<tr><td>${u.unit_id}</td><td>${st}</td><td>${u.assigned_model||"-"}</td>
+        <td>${pct(m.annual_return)}</td><td>${pct(m.max_drawdown)}</td>
+        <td>${(m.sharpe===undefined?"-":m.sharpe.toFixed(3))}</td>
+        <td>${u.reason||u.error||"-"}</td><td>${curve}</td></tr>`;
+    }
+    const curve = u.status==="done" ? `<a class="muted" href="/api/plot?unit_id=${u.unit_id}&kind=curve" target="_blank">训练曲线</a>` : "-";
+    return `<tr><td>${u.unit_id}</td><td>${st}</td><td>${(u.duration_sec||0).toFixed(2)}</td>
+      <td>${u.model_path? "✔" : "-"}</td><td>${u.assigned_model||"-"}</td>
+      <td>${u.reason||u.error||"-"}</td><td>${curve}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">无数据</td></tr>`;
+}
+
+async function loadUnits() {
+  const q=$("u-q").value, st=$("u-status").value, ph=$("u-phase").value;
+  const r = await fetch(`/api/units?phase=${ph}&status=${st}&q=${encodeURIComponent(q)}&page_size=1000`);
+  const j = await r.json();
+  $("u-total").textContent = "共 " + j.total;
+  $("u-body").innerHTML = rowsForUnits(j.items||[], false);
+}
+
+async function loadDetect() {
+  const q=$("d-q").value;
+  const r = await fetch(`/api/units?phase=detect&q=${encodeURIComponent(q)}&page_size=1000`);
+  const j = await r.json();
+  $("d-total").textContent = "共 " + j.total;
+  $("d-body").innerHTML = rowsForUnits(j.items||[], true);
+}
+
+async function loadData() {
+  const r = await fetch("/api/data"); const j = await r.json();
+  $("data-summary").innerHTML = `<span>代码数 <b>${j.symbols_count}</b></span>
+    <span>日期范围 <b>${j.date_range.start||"-"} ~ ${j.date_range.end||"-"}</b></span>
+    <span>缓存目录 <b>${j.cache_dir}</b></span>`;
+  $("data-body").innerHTML = (j.items||[]).map(d =>
+    `<tr><td>${d.symbol}</td><td>${d.rows}</td><td>${d.start}</td><td>${d.end}</td>
+     <td>${d.missing_days}</td><td>${d.source}</td><td>${d.adjust}</td></tr>`).join("")
+     || `<tr><td colspan="7" class="muted">暂无缓存</td></tr>`;
+}
+
+async function loadLogs() {
+  const ph=$("l-phase").value;
+  const r = await fetch(`/api/logs?phase=${ph}&tail=300`); const j = await r.json();
+  $("l-file").textContent = j.file || "无日志";
+  $("l-body").textContent = (j.lines||[]).join("\n") || "（空）";
+}
+
+async function refreshUnified() {
+  let s;
+  try {
+    const r = await fetch('/api/unified/status'); s = await r.json();
+    if (!r.ok || !s.ok) throw new Error(s.error || '状态读取失败');
+  } catch (e) {
+    $('unified-summary').textContent = '状态读取失败: ' + e.message;
+    $('unified-msg').textContent = '状态读取失败: ' + e.message;
+    $('u-state').textContent = '接口异常'; $('u-state').style.color = 'var(--err)';
+    $('u-bar').style.width = '0%'; $('u-steps').textContent = '-';
+    $('u-prog').textContent = '-'; $('u-speed').textContent = '-';
+    $('u-eta').textContent = '-'; $('u-elapsed').textContent = '-';
+    $('u-ckpt').textContent = '-'; $('u-run').textContent = '-'; $('u-proc').textContent = '-';
+    return;
+  }
+
+  const running = !!s.running;
+  const pct = (s.progress || 0) * 100;
+  const steps = s.timesteps || 0, target = s.target_timesteps || 0;
+  const elapsed = s.elapsed_sec || 0;
+  const speed = elapsed > 0.5 ? steps / elapsed : 0;
+  const remain = Math.max(0, target - steps);
+  const eta = speed > 0 ? remain / speed : null;
+
+  const fmtInt = v => (v == null ? '-' : Math.round(v).toLocaleString('en-US'));
+  const fmtDur = sec => {
+    if (sec == null || !isFinite(sec) || sec < 0) return '-';
+    const s2 = Math.floor(sec % 60), m = Math.floor(sec / 60) % 60, h = Math.floor(sec / 3600);
+    if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`;
+    if (m > 0) return `${m}m${String(s2).padStart(2, '0')}s`;
+    return `${s2}s`;
+  };
+  const phaseText = {
+    preparing: '准备数据/特征中', running: '训练中', evaluating: '评估中',
+    paused: '已暂停', done: '已完成', failed: '失败', stopped: '已停止'
+  };
+  const phase = s.process_state || 'unknown';
+  const stateLabel = phaseText[phase] || phase;
+
+  // ---- 统一训练页主行 ----
+  $('unified-bar').style.width = Math.min(100, pct).toFixed(1) + '%';
+  $('unified-bar').style.background = running ? 'var(--acc)' : (phase === 'done' ? 'var(--ok)' : 'var(--warn)');
+  $('unified-summary').innerHTML =
+    `<span style="color:${running ? 'var(--ok)' : 'var(--warn)'}"><b>${stateLabel}</b></span>` +
+    `<span>进度 <b>${pct.toFixed(1)}%</b></span>` +
+    `<span>步数 <b>${fmtInt(steps)} / ${fmtInt(target)}</b></span>` +
+    `<span>速度 <b>${speed > 0 ? fmtInt(speed) + ' 步/秒' : '-'}</b></span>` +
+    `<span>ETA <b>${fmtDur(eta)}</b></span>` +
+    `<span>已运行 <b>${fmtDur(elapsed)}</b></span>` +
+    `<span>run <b>${s.run_id || '-'}</b></span>` +
+    (s.error ? `<span style="color:var(--err)">错误 <b>${s.error}</b></span>` : '');
+
+  // ---- 概览页卡片 ----
+  $('u-bar').style.width = Math.min(100, pct).toFixed(1) + '%';
+  $('u-bar').style.background = running ? 'var(--acc)' : (phase === 'done' ? 'var(--ok)' : 'var(--warn)');
+  $('u-state').textContent = stateLabel + (running ? ' ●' : '');
+  $('u-state').style.color = running ? 'var(--ok)' : (phase === 'done' ? 'var(--acc)' : 'var(--warn)');
+  $('u-prog').textContent = pct.toFixed(1) + '%';
+  $('u-steps').textContent = `${fmtInt(steps)} / ${fmtInt(target)}`;
+  $('u-speed').textContent = speed > 0 ? fmtInt(speed) + ' 步/秒' : '-';
+  $('u-eta').textContent = fmtDur(eta);
+  $('u-elapsed').textContent = fmtDur(elapsed);
+  $('u-ckpt').textContent = fmtInt(s.checkpoint_timesteps);
+  $('u-run').textContent = s.run_id || '-';
+  $('u-proc').textContent = running ? '运行中' : '未运行';
+
+  // ---- 指标卡片 ----
+  const tm = s.training_metrics || {};
+  const ec = s.episode_counts || {};
+  const kpi = [
+    ['观测形状', (s.observation_shape || []).join('×') || '-'],
+    ['缓存读取', `${s.cache_processed || 0} / ${s.cache_total || 0}`],
+    ['episode（train/val/test）', `${ec.train ?? '-'} / ${ec.val ?? '-'} / ${ec.test ?? '-'}`],
+    ['学习率', tm['train/learning_rate'] != null ? tm['train/learning_rate'].toExponential(2) : '-'],
+    ['策略梯度损失', tm['train/policy_gradient_loss'] != null ? tm['train/policy_gradient_loss'].toFixed(5) : '-'],
+    ['价值损失', tm['train/value_loss'] != null ? tm['train/value_loss'].toFixed(5) : '-'],
+    ['熵', tm['train/entropy_loss'] != null ? tm['train/entropy_loss'].toFixed(4) : '-'],
+    ['近似 KL', tm['train/approx_kl'] != null ? tm['train/approx_kl'].toFixed(5) : '-'],
+    ['解释方差', tm['train/explained_variance'] != null ? tm['train/explained_variance'].toFixed(3) : '-'],
+    ['最后更新时间', (s.updated_at || '-').replace('T', ' ').slice(0, 19)]
+  ];
+  $('unified-kpi').innerHTML = kpi.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('');
+
+  renderUnifiedChart(s);
+  $('unified-detail').textContent = JSON.stringify(s, null, 2);
+
+  const previous = $('unified-run').value;
+  $('unified-run').replaceChildren(new Option('新建 run', ''), ...(s.runs || []).map(x => new Option(`${x.run_id} / ${x.process_state} / ${x.timesteps} 步${x.model_available ? '' : ' / 无 checkpoint'}`, x.run_id)));
+  if ((s.runs || []).some(x => x.run_id === previous)) $('unified-run').value = previous;
+}
+
+let _uChart = null;
+const _uHistory = [];      // 浏览器端指标历史：每次轮询按 step 追加/覆盖
+let _uLastStep = -1;
+const _uMaxPts = 400;
+function renderUnifiedChart(s) {
+  const tm = s.training_metrics || {};
+  const step = s.timesteps || 0;
+  // 后端仅保存「最近一次」指标，历史由页面按 step 累积（同 step 覆盖，避免重复采样）
+  if (step !== _uLastStep && tm['train/value_loss'] != null) {
+    const pt = {
+      step: step,
+      pg: tm['train/policy_gradient_loss'] == null ? null : tm['train/policy_gradient_loss'],
+      vl: tm['train/value_loss'] == null ? null : tm['train/value_loss'],
+      ent: tm['train/entropy_loss'] == null ? null : tm['train/entropy_loss'],
+      kl: tm['train/approx_kl'] == null ? null : tm['train/approx_kl']
+    };
+    const last = _uHistory[_uHistory.length - 1];
+    if (last && last.step === step) _uHistory[_uHistory.length - 1] = pt;
+    else _uHistory.push(pt);
+    while (_uHistory.length > _uMaxPts) _uHistory.shift();
+    _uLastStep = step;
+  }
+  const el = document.getElementById('unified-chart');
+  if (!window.echarts) { $('unified-chart-note').textContent = 'ECharts 未加载。'; return; }
+  if (!_uHistory.length) {
+    $('unified-chart-note').textContent = '正在采集指标样本…（每 1.5 秒一个点，需训练持续一段时间才有趋势）';
+    if (_uChart) _uChart.clear();
+    return;
+  }
+  if (!_uChart) _uChart = echarts.init(el);
+  const series = [
+    ['vl', '价值损失', '#22c55e'],
+    ['pg', '策略梯度损失', '#3b82f6'],
+    ['ent', '熵', '#f59e0b'],
+    ['kl', '近似 KL', '#a855f7']
+  ];
+  _uChart.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: series.map(function(x) { return x[1]; }), textStyle: { color: '#8b98a5' }, top: 0 },
+    grid: { left: 62, right: 24, top: 34, bottom: 42 },
+    xAxis: {
+      type: 'category',
+      data: _uHistory.map(function(p) { return p.step.toLocaleString('en-US'); }),
+      axisLabel: { color: '#8b98a5' },
+      name: '训练 step', nameTextStyle: { color: '#8b98a5' }
+    },
+    yAxis: { type: 'value', scale: true, axisLabel: { color: '#8b98a5' }, splitLine: { lineStyle: { color: '#2b3543' } } },
+    series: series.map(function(x) {
+      return {
+        name: x[1], type: 'line', showSymbol: false, smooth: true, color: x[2],
+        data: _uHistory.map(function(p) { return p[x[0]]; })
+      };
+    })
+  }, true);
+  $('unified-chart-note').textContent =
+    '本页已采样 ' + _uHistory.length + ' 个点（最多保留 ' + _uMaxPts + ' 个）。后端仅保存最新指标，刷新页面会重新开始记录。';
+}
+
+async function unifiedCtl(action, resume = false) {
+  try {
+    const payload = {action};
+    if (action === 'start') {
+      if (!confirm(resume ? '从选中 run 的 checkpoint 续训？' : '启动一个统一 PPO 训练新 run？')) return;
+      payload.timesteps = Number($('unified-steps').value);
+      if (resume) { payload.resume = true; payload.run_id = $('unified-run').value; }
+      else payload.execution = $('unified-execution').value;
+    }
+    const r = await fetch('/api/unified/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    const j = await r.json(); $('unified-msg').textContent = j.msg || j.error;
+    refreshUnified();
+  } catch (e) { $('unified-msg').textContent = '控制失败: ' + e.message; }
+}
+refreshUnified();
+setInterval(refreshUnified, 1500);
+
+// 初始 + 每 1.5s 刷新（<2s，满足 AC9）
+refreshStatus();
+setInterval(refreshStatus, 1500);
+</script>
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/replay.js"></script>
+<script>
+window.addEventListener('hashchange', () => {
+  const name = location.hash.slice(1);
+  if (document.getElementById('tab-' + name)) showTab(name);
+});
+if (document.getElementById('tab-' + location.hash.slice(1))) showTab(location.hash.slice(1));
+</script>
+</body>
+</html>

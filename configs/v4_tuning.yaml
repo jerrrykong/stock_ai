@@ -1,0 +1,115 @@
+# v4 训练配置：方案 A（训练侧调参），与 v3 受控对照
+#
+# 基线 v3（20261020_105633_578f25aa）：timesteps 200万 / gamma 0.99 / ent_coef 0.0
+#   / n_envs 1 / lambda_leverage 0.0 → test 有交易超额 −5.04%
+#
+# 本文件只改训练侧超参；数据、执行语义、奖励口径与 v3 完全一致
+# （奖励仍由 CLI 的 --reward excess 预设给出：turnover 0.002 / drawdown 0 / leverage 0）。
+#
+# 每项改动的依据（见 outputs/improvement_plan.md）：
+#   timesteps 200万→900万 : 200 万步 / 1859 episode / 230.7 步每 episode
+#                            → 每个 train episode 仅被访问 4.67 次，严重欠采样。
+#                            900 万步时约 23 次。
+#   ent_coef    0.0→0.015  : 三动作离散空间 + 零探索 = 早期锁定在
+#                            「建仓后持续持有」；v3 持仓时 68.8% 动作是无效买入。
+#   gamma       0.99→0.995 : 有效视野 100 步 ≈ 5.2 个月，而信号最强在 60 日
+#                            （ma20_relative 60 日 IC −0.184）。0.995 → 200 步 ≈ 10.4 个月，
+#                            且 episode 后 1/3 的折扣权重从 19.1% 升到 30.2%。
+#   n_envs      1→4        : DummyVecEnv 串行执行，实测吞吐 1751→2833 步/秒
+#                            （1.6 倍），采样多样性 ×4。
+#
+# 刻意**未**改动：
+#   lambda_turnover 0.002  : 诊断显示成本拖累仅 0.71%，而择时技能项为负
+#                            （test −0.59%），摩擦不是主因。改它会与
+#                            「训练不足」混淆，无法归因。
+#   learning_rate / n_steps / batch_size / n_epochs : 保持与 v3 一致。
+
+random_seed: 42
+log_level: INFO
+
+data:
+  symbols: []
+  start: "20180101"
+  end: "20241231"
+  source: akshare
+  cache_dir: data/raw
+  adjust: none
+  retry_times: 3
+  retry_backoff: 1.5
+  timeout: 15.0
+
+sample:
+  window: 20
+  features:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - ma5
+    - ma10
+    - ma20
+    - momentum
+    - volatility
+    - volume_ratio
+  train_start: "20180101"
+  train_end:   "20211231"
+  test_start:  "20220101"
+  test_end:    "20241231"
+  embargo_days: 5
+  normalize: true
+
+env:
+  initial_cash: 1000000.0
+  commission_rate: 0.00025
+  stamp_tax_rate: 0.0005
+  slippage_rate: 0.001
+  min_commission: 5.0
+  # reward_type 由 CLI 的 --reward excess 覆盖（excess 预设会把
+  # lambda_turnover 置 0.002、lambda_drawdown 置 0、lambda_leverage 置 0）
+  reward_type: drawdown_penalty
+  lambda_drawdown: 0.1
+  lambda_turnover: 0.001
+  # 保留 config 原值；excess 预设会覆盖为 0（详见 scale_cmd.py 预设处注释）
+  lambda_leverage: 0.01
+  max_position: 1.0
+  lot_size: 100
+
+train:
+  algo: ppo
+  timesteps: 9000000                # ← 方案 A：200万 → 900万
+  learning_rate: 0.0003
+  gamma: 0.995                      # ← 方案 A：0.99 → 0.995
+  gae_lambda: 0.95
+  clip_range: 0.2
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  ent_coef: 0.015                   # ← 方案 A：0.0 → 0.015
+  torch_threads: 1
+  backend: auto
+  out_dir: models
+
+paths:
+  root: .
+  raw: data/raw
+  samples: data/samples
+  models: models
+  logs: logs
+  reports: reports
+
+scale:
+  years: null
+  symbols_file: configs/symbols_hs300_full.yaml
+  split_ratio:
+    train: 0.8
+    detect: 0.2
+  workers: 1
+  poll_sec: 2
+  train:
+    timesteps: 20000
+    algo: ppo
+    backend: auto
+  detect:
+    model_policy: nearest_past
+    mode: backtest

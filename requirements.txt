@@ -1,0 +1,24 @@
+# ===== 核心计算 =====
+numpy>=2.1,<2.6          # 环境已有 2.5.3；SB3>=2.5 支持 NumPy 2.x
+pandas>=2.2,<3.0
+scipy>=1.14
+
+# ===== 数据源 =====
+akshare>=1.14.0          # 主数据源（不锁死，接口频繁变动）
+requests>=2.32.0         # 腾讯/东财 fallback + 重试
+pyarrow>=17.0,<22.0      # parquet 引擎
+
+# ===== 强化学习 =====
+torch>=2.6,<2.8          # cp313 win_amd64 稳定 wheel 区间（CPU 版）
+gymnasium==1.1.1         # 钉死版本，避免解析器越界（SB3 对 gymnasium 是上限约束）
+stable-baselines3>=2.6,<2.9   # 2.8.0 起正式支持 Py3.13；2.9 要求 torch>=2.8（冲突）
+
+# ===== CLI / 配置 =====
+click>=8.1.0
+pyyaml>=6.0.0
+
+# ===== 可视化 =====
+matplotlib>=3.9.0
+
+# ===== 进度与日志 =====
+tqdm>=4.66.0
