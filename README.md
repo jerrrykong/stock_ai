@@ -115,6 +115,7 @@ python -m stock_ai data fetch --symbols 600519 --source synthetic --start 202001
 | `run.ps1`                  | `run.sh`                  | 统一入口：`status` / `help` / 六大命令快捷方式 / `cli` 参数透传                   |
 | `scripts/setup_env.ps1`    | `scripts/setup_env.sh`    | 一键搭建环境（建 venv → 装依赖 → `pip install -e .` → `doctor`）             |
 | `scripts/run_pipeline.ps1` | `scripts/run_pipeline.sh` | 端到端 6 步流水线（fetch → sample → train → backtest → predict → status） |
+| —（无）                       | `scripts/deploy.sh`       | 部署：同步本地项目到远程主机（打包 → scp → 远程解包；连接信息全部由参数/环境变量传入） |
 
 > `run.sh` 与 `scripts/*.sh` 均为 **LF 行尾、无 BOM、`#!/usr/bin/env bash` + `set -euo pipefail`**。
 
@@ -156,9 +157,30 @@ bash run.sh doctor
 
 `run.sh` 会按 `./.venv/bin/python` → `python3` → `python` 顺序自动定位解释器；也可用环境变量 **`STOCKAI_PYTHON`** 显式指定。
 
-### 3.4 远程部署说明（已移除）
+### 3.4 远程主机一键部署
 
-> 出于安全考虑，原远程主机一键部署脚本（`scripts/deploy.sh`）及其包含主机地址、SSH 账号的部署说明已从仓库移除。如需把代码同步到自己的远程主机，请自行准备部署方式，且不要将主机 IP、SSH 用户等敏感信息提交到版本库。
+`deploy.sh` 的连接信息**全部通过命令行参数或环境变量传入**，脚本内不含任何主机 IP、SSH 账号：
+
+```bash
+# 本地：同步项目到远程（打包 -> scp -> 远程解包，自动排除 .venv/data/models/...）
+bash scripts/deploy.sh --host <REMOTE_HOST> --user <REMOTE_USER> --dir '~/stock_ai'
+
+# 远程：建环境 + 跑通
+ssh <REMOTE_USER>@<REMOTE_HOST>
+cd ~/stock_ai && bash scripts/setup_env.sh && bash scripts/run_pipeline.sh
+```
+
+可用参数（优先级：命令行参数 > 环境变量）：
+
+| 参数      | 环境变量       | 默认值       | 说明                        |
+| --------- | -------------- | ------------ | --------------------------- |
+| `--host`  | `REMOTE_HOST`  | （无，必填） | 远程主机 IP 或域名           |
+| `--user`  | `REMOTE_USER`  | （无，必填） | 远程 SSH 用户                |
+| `--dir`   | `REMOTE_DIR`   | `~/stock_ai` | 远程项目目录（~ 在远程展开） |
+| `--port`  | `SSH_PORT`     | `22`         | SSH 端口                    |
+
+> 需要 SSH 密钥认证（脚本以 `BatchMode=yes` 运行，不会交互输密码）；主机密钥校验采用 `accept-new`：首次连接自动记录新主机密钥，密钥变化时仍会拒绝。
+> `deploy.sh` 就地覆盖远程**代码**，保留远程运行时产物（打包时排除 `./data`、`./models`、`./reports`、`./logs`、`./.venv`、`./.git`）。**不要把真实主机 IP / 账号提交到版本库或文档。**
 
 ### 3.5 Linux 环境适配要点
 
@@ -381,7 +403,7 @@ python -m stock_ai.infer.predict_cli --model models/ppo_x.zip --symbols 600519 -
 stock_ai/
 ├── run.ps1 / run.sh         # 统一入口（Windows PowerShell / Linux Bash）
 ├── configs/                 # default.yaml / fast_dev.yaml / symbols_hs300.yaml
-├── scripts/                 # setup_env.{ps1,sh} / run_pipeline.{ps1,sh}
+├── scripts/                 # setup_env.{ps1,sh} / run_pipeline.{ps1,sh} / deploy.sh
 ├── src/stock_ai/
 │   ├── config/              # AppConfig dataclass + ConfigLoader
 │   ├── utils/               # errors / logging / seed / io / hashing / retry / dates
